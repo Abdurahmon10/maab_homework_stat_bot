@@ -231,7 +231,7 @@ def get_assignment(df, assignment_num):
     return result
 def get_lead(df):
     df_name_hw = df[["First Name", "Last Name", "Finished HW"]]
-    df_name_hw = df_name_hw.sort_values(by="Finished HW")
+    df_name_hw = df_name_hw.sort_values(by="Finished HW",ascending=False)
     result = "\n-----------------------------------------\n".join(
         f"{row['First Name']} {row['Last Name']}: {row['Finished HW']}"
         for _, row in df_name_hw.iterrows()
