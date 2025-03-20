@@ -203,6 +203,7 @@ def get__assignments(df):
     global assignments
     assignments=[i for i in df.columns if "SCORE" in i]
     assignments.append("Leaderboard")
+    assignments.append("Return")
     assignments_split=split_list(assignments)
     return assignments_split
 
@@ -217,16 +218,17 @@ def get__assignments(df):
 #     df_name_hw=df_name_hw.sort_values(by="Finished HW")
 #     return df_name_hw.to_string()
 
+import pandas as pd
+
 def get_assignment(df, assignment_num):
     if assignment_num not in df.columns:
         return "Assignment not found"
     df_name_assignment = df[["First Name", "Last Name", assignment_num]]
     result = "\n-----------------------------------------\n".join(
-        f"{row['First Name']} {row['Last Name']}: {row[assignment_num] if not pd.isna(row[assignment_num]) else 'Not Reached'}"
+        f"{row['First Name']} {row['Last Name']}: {row[assignment_num] if not pd.isnull(row[assignment_num]) and row[assignment_num] != '' else 'Not Reached'}"
         for _, row in df_name_assignment.iterrows()
     )
     return result
-
 def get_lead(df):
     df_name_hw = df[["First Name", "Last Name", "Finished HW"]]
     df_name_hw = df_name_hw.sort_values(by="Finished HW")
@@ -299,6 +301,7 @@ def handle_response(text:str,request_type:int):
         global our_sheets_names
         global class_id
         global class_subject_df
+        global subject
 
         sheet_id=""
         for i in our_groups:
@@ -312,12 +315,15 @@ def handle_response(text:str,request_type:int):
         print(our_sheets)
         our_sheets_names=[i.title for i in our_sheets   ]
         keyboard=[i.title for i in our_sheets]
+        keyboard.append("Return")
         keyboard=split_list(keyboard) # Rows of buttons
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         return ["Subjects:", reply_markup]
     elif request_type==2:
+        if(text!="Return"):
+            subject=text
         global class_subject_df
-        class_subject_df=read_sheet_to_dataframe(class_id,text)
+        class_subject_df=read_sheet_to_dataframe(class_id,subject)
         keyboard=get__assignments(class_subject_df)
         return ["Choose a specific assignment or leaderboard to view:",ReplyKeyboardMarkup(keyboard,resize_keyboard=True)]
     
@@ -326,9 +332,10 @@ def handle_response(text:str,request_type:int):
             return get_assignment(class_subject_df,text)
         else:
             return get_lead(class_subject_df)
-
-
-        
+    else:
+        keyboard = split_list(our_groups_names)  # Rows of buttons
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        return ["Choose a group:", reply_markup]
 
 
 
@@ -349,10 +356,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE,):
     print(our_groups_names)
     if(text in our_groups_names):
         request_type=1
+    elif text=="Return":
+        request_type=request_type-1
     elif text in our_sheets_names:
         request_type=2
     elif text in assignments:
         request_type=3
+    else:
+        await update.message.reply_text("Try again, there is something wrong with your input!")
+        request_type=request_type
 
     if(message_type=='group'):
         if BOT_USERNAME in text:
