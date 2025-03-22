@@ -1,21 +1,21 @@
-import os
-import time
-import asyncio
-import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
-from telegram import Bot, Update, ReplyKeyboardMarkup
+import pandas as pd
+from telegram import Bot
+from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import asyncio
 
-# --------------------------
-# Global shared variables
-# --------------------------
-# These values are shared among all users and set once when the bot starts.
+#data handling part
+
+# Define the scopes for Drive and Sheets APIs (read-only)
 SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets.readonly',
     'https://www.googleapis.com/auth/drive.readonly'
 ]
+
+# Path to your service account JSON file
 SERVICE_ACCOUNT_FILE = 'maabbot.json'
 SHARED_FOLDER_ID = "1c8M22kmwXJD5gaW1NOiH6Z-AYxUASxoP"
 
@@ -23,98 +23,114 @@ SHARED_FOLDER_ID = "1c8M22kmwXJD5gaW1NOiH6Z-AYxUASxoP"
 credentials = Credentials.from_service_account_file(
     SERVICE_ACCOUNT_FILE, scopes=SCOPES
 )
+
+# Initialize clients
 drive_service = build('drive', 'v3', credentials=credentials)
 sheets_client = gspread.authorize(credentials)
 
-# Shared groups data; loaded once during startup.
-our_groups = []
-our_groups_names = []
-
-# These globals below are for data that is intended to be shared
-# (e.g. assignment names) but note that user-specific state like
-# selected class or subject is now moved to context.user_data.
-our_sheets = []
-our_sheets_names = []
-assignments = []
-
-# Bot token (store it as an environment variable for security)
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-BOT_USERNAME = '@maab_homework_bot'
 
 
-# --------------------------
-# Utility Functions
-# --------------------------
-def split_list(lst, chunk_size=3):
-    #Splits a list into chunks for keyboard layout.
-    return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
-
-
-def retry_api_call(func, retries=3, delay=2):
-    #Retry wrapper for API calls
-    for _ in range(retries):
-        try:
-            return func()
-        except Exception as e:
-            print(f"API Error: {e}, retrying in {delay} seconds...")
-            time.sleep(delay)
-    return None
-
-
+#obtaining groups
 def groups():
-    # Get files (groups) from the shared folder.
-    # These groups are shared across all users.
+    """
+    Find a Google Sheet by its name via a shortcut in the shared folder.
+    Returns the sheet ID if found, None otherwise.
+    """
+    # Query: List all files in the shared folder
     query = f"'{SHARED_FOLDER_ID}' in parents"
     print(f"Attempting query: {query}")
-
+    
     try:
         results = drive_service.files().list(
             q=query,
             fields="files(id, name, mimeType, shortcutDetails)"
         ).execute()
+        
         files = results.get('files', [])
+        #print(files)
         if not files:
-            print("No files found in the shared folder.")
-            return []
+            print(f"No files found in the shared folder.")
+            return None
         return files
     except Exception as e:
-        print(f"Error finding groups: {e}")
-        return []
-
-
-def sheets(sheet_id):
-    #Return the worksheets of a given Google Sheet ID.
-    try:
-        if not sheet_id:
-            return None
-        spreadsheet = sheets_client.open_by_key(sheet_id)
-        worksheets = spreadsheet.worksheets()
-        return worksheets
-    except Exception as e:
-        print(f"An error occurred in sheets(): {e}")
+        print(f"Error finding sheet: {e}")
         return None
 
 
+#groups obtaining
+our_groups=[]
+our_groups_names=[]
+
+group_ids=pd.DataFrame()
+
+#ibtaining worksheet
+
+def sheets(sheet_id):
+    try:
+        # Find the sheet ID via shortcut
+        #sheet_id = find_sheet_by_name(sheet_name)
+        if not sheet_id:
+            return None
+
+        # Open the sheet using its ID
+        spreadsheet = sheets_client.open_by_key(sheet_id)
+        
+        # Get the specific worksheet
+        worksheets = spreadsheet.worksheets();
+        return worksheets
+        
+        # # Get all data as a list of lists
+        # data = worksheet.get_all_values()
+        
+        # # Convert to DataFrame (assuming first row is headers)
+        # if data:
+        #     df = pd.DataFrame(data[1:], columns=data[0])
+        #     return df
+        # else:
+        #     print(f"No data found in worksheet: {worksheet_name}")
+        #     return None
+
+    except gspread.exceptions.WorksheetNotFound:
+        print(f"Worksheet  not found in sheet '{sheet_id}'.")
+        return None
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return None
+our_sheets=[]
+our_sheets_names=[]
+class_id=""
+subject=""
+class_subject_df=pd.DataFrame()
+assignments=[]
+
+request_type = -1
+
+def split_list(lst, chunk_size=3):
+    return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
+
+
+#find sheet by name
 def find_sheet_by_name(sheet_name):
- 
-    # Find a Google Sheet by its shortcut name in the shared folder.
-    # This function returns the target sheet ID if found.
- 
+    """
+    Find a Google Sheet by its name via a shortcut in the shared folder.
+    Returns the sheet ID if found, None otherwise.
+    """
+    # Query: List all files in the shared folder
     query = f"'{SHARED_FOLDER_ID}' in parents"
     print(f"Attempting query: {query}")
-
+    
     try:
         results = drive_service.files().list(
             q=query,
             fields="files(id, name, mimeType, shortcutDetails)"
         ).execute()
-
+        
         files = results.get('files', [])
         if not files:
-            print("No files found in the shared folder.")
+            print(f"No files found in the shared folder.")
             return None
-
-        # Look for a shortcut with the given name
+        
+        # Filter for the shortcut with the given name
         for file in files:
             if (file['name'] == sheet_name and 
                 file['mimeType'] == 'application/vnd.google-apps.shortcut'):
@@ -122,231 +138,290 @@ def find_sheet_by_name(sheet_name):
                 if not target_id:
                     print(f"Shortcut found but no target ID: {file['name']} (ID: {file['id']})")
                     return None
-
-                # Verify target is a Google Sheet
+                
+                # Verify the target is a Google Sheet
                 target_file = drive_service.files().get(
                     fileId=target_id,
                     fields="id, name, mimeType"
                 ).execute()
+                
                 if target_file.get('mimeType') != 'application/vnd.google-apps.spreadsheet':
                     print(f"Target of shortcut is not a Google Sheet: {target_file['name']}")
                     return None
-
+                
                 print(f"Found sheet via shortcut: {target_file['name']} (ID: {target_id})")
                 return target_id
-
+        
         print(f"No shortcut found for '{sheet_name}' in the shared folder.")
         return None
-
+    
     except Exception as e:
         print(f"Error finding sheet: {e}")
         return None
 
-
 def read_sheet_to_dataframe(sheet_id, worksheet_name):
-    #Read a specific worksheet from a Google Sheet into a DataFrame.
+    """
+    Read a specific worksheet from a Google Sheet into a Pandas DataFrame.
+    Args:
+        sheet_name (str): Name of the Google Sheet (shortcut name).
+        worksheet_name (str): Name of the worksheet (tab) within the sheet.
+    Returns:
+        pd.DataFrame: Data from the worksheet, or None if not found.
+    """
     try:
+        # # Find the sheet ID via shortcut
+        # sheet_id = find_sheet_by_name(sheet_name)
+        # if not sheet_id:
+        #     return None
+
+        # # Open the sheet using its ID
         spreadsheet = sheets_client.open_by_key(sheet_id)
+        
+        # Get the specific worksheet
         worksheet = spreadsheet.worksheet(worksheet_name)
+         
+        # Get all data as a list of lists
         data = worksheet.get_all_values()
+        
+        # Convert to DataFrame (assuming first row is headers)
         if data:
             df = pd.DataFrame(data[1:], columns=data[0])
             return df
         else:
             print(f"No data found in worksheet: {worksheet_name}")
             return None
+
+    except gspread.exceptions.WorksheetNotFound:
+        print(f"Worksheet '{worksheet_name}' not found in sheet '{sheet_id}'.")
+        return None
     except Exception as e:
-        print(f"Error reading worksheet '{worksheet_name}' from sheet '{sheet_id}': {e}")
+        print(f"An error occurred: {e}")
         return None
 
+#getting the assignments
 
 def get__assignments(df):
-    
-    #Get a list of assignment columns from the DataFrame.
     global assignments
-    assignments = [i for i in df.columns if "SCORE" in i]
+    assignments=[i for i in df.columns if "SCORE" in i]
     assignments.append("Leaderboard")
     assignments.append("Return")
-    return split_list(assignments)
+    assignments_split=split_list(assignments)
+    return assignments_split
 
+
+# def get_assignment(df,assignment_num):
+#     df_name_assignment=df[["First Name","Last Name",assignment_num]]
+#     print(assignment_num)
+#     return df_name_assignment.to_string()
+
+# def get_lead(df):
+#     df_name_hw=df[["First Name","Last Name","Finished HW"]]
+#     df_name_hw=df_name_hw.sort_values(by="Finished HW")
+#     return df_name_hw.to_string()
+
+import pandas as pd
 
 def get_assignment(df, assignment_num):
     if assignment_num not in df.columns:
         return "Assignment not found"
     df_name_assignment = df[["First Name", "Last Name", assignment_num]]
     result = "\n-----------------------------------------\n".join(
-        f"{row['First Name']} {row['Last Name']}: {row[assignment_num] if row[assignment_num] else 'Not Reached'}"
+        f"{row['First Name']} {row['Last Name']}: {row[assignment_num] if not pd.isnull(row[assignment_num]) and row[assignment_num] != '' else 'Not Reached'}"
         for _, row in df_name_assignment.iterrows()
     )
     return result
-
-
 def get_lead(df):
     df_name_hw = df[["First Name", "Last Name", "Finished HW"]]
-    df_name_hw = df_name_hw.sort_values(by="Finished HW", ascending=False)
+    df_name_hw = df_name_hw.sort_values(by="Finished HW",ascending=False)
     result = "\n-----------------------------------------\n".join(
         f"{row['First Name']} {row['Last Name']}: {row['Finished HW']}"
         for _, row in df_name_hw.iterrows()
     )
     return result
 
-# Bot Command Handlers-
+
+
+# Example usage with input
+
+
+def request1():
+    sheet_name = input("Enter the name of the Google Sheet (shortcut name): ")
+    worksheet_name = input("Enter the name of the worksheet (tab): ")
+    df = read_sheet_to_dataframe(sheet_name, worksheet_name)
+    if df is not None:
+        print(f"Data from '{worksheet_name}' in '{sheet_name}':")
+        print(df)
+    else:
+        print("Failed to load the requested data.")
+    
+
+
+    df_per_hw=df[['First Name','Last Name','Finished HW']]
+    print(df_per_hw)
+
+#bot handling part
+
+
+BOT_USERNAME='@maab_homework_bot'
+TOKEN = '7816384022:AAH0QTdTdNc9LxHBrZWGbyS9g2muFHY8nNo'
+
+
+
+
+#bot commands
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Shared global groups are used here to build the keyboard.
-    keyboard = split_list(our_groups_names)  # rows of buttons
+    #print([i["name"] for i in our_groups])
+    
+    keyboard = split_list(our_groups_names)  # Rows of buttons
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("The bot has started.")
     await update.message.reply_text("Choose a group:", reply_markup=reply_markup)
     
-    # Initialize user-specific state in context.user_data if not already set.
-    user_data = context.user_data
-    if "request_type" not in user_data:
-        user_data["request_type"] = 0  # initial step
-    # We'll store per-user selections: class_id, subject, and class_subject_df as needed.
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Choose a class name ==> choose the course ==> choose the assignment number.")
-
+    await update.message.reply_text("Choose a class name==> choose the course===> choose the assignment number.")
 
 async def custom1_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("custom 1")
-
 
 async def custom2_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("custom 2")
 
 
-# Core Handler Logic
-def handle_response(text: str, request_type: int, user_data: dict):
 
-    # request_type values:
-    # 0: Choose a group.
-    # 1: Group selected, now choose a subject.
-    # 2: Subject selected, now choose assignment/leaderboard.
-    # 3: Assignment/leaderboard selected, show results.
-    
-    # We'll use the global variables our_groups, our_groups_names, our_sheets, our_sheets_names, and assignments
-    if request_type == 0:
-        # User selected a group from the keyboard.
-        # Find the group matching the text.
-        sheet_id = ""
-        for group in our_groups:
-            if group["name"] == text:
-                sheet_id = group.get("shortcutDetails", {}).get("targetId", "")
-                user_data["class_id"] = sheet_id  # save in user_data
+#handling responses
+
+
+def handle_response(text:str,request_type:int):
+
+    if(request_type==1):
+
+        global our_sheets
+        global our_sheets_names
+        global class_id
+        global class_subject_df
+        global subject
+
+        sheet_id=""
+        for i in our_groups:
+            print(i)
+            if(i["name"]=="F18_test"):
+                sheet_id=i['shortcutDetails']['targetId']
+                class_id=sheet_id
                 break
-        if not sheet_id:
-            return ["Group not found!", None]
-        # Load subjects (worksheets) from this sheet.
-        sheets_list = sheets(sheet_id)
-        if not sheets_list:
-            return ["No subjects found in the group.", None]
-        user_data["sheets_list"] = sheets_list  # store list of worksheets in user_data
-        global our_sheets, our_sheets_names
-        our_sheets = sheets_list
-        our_sheets_names = [ws.title for ws in sheets_list]
-        keyboard = our_sheets_names + ["Return"]
-        keyboard = split_list(keyboard)
-        return ["Subjects:", ReplyKeyboardMarkup(keyboard, resize_keyboard=True)]
+        print(sheet_id)
+        our_sheets=sheets(sheet_id)
+        print(our_sheets)
+        our_sheets_names=[i.title for i in our_sheets   ]
+        keyboard=[i.title for i in our_sheets]
+        keyboard.append("Return")
+        keyboard=split_list(keyboard) # Rows of buttons
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        return ["Subjects:", reply_markup]
+    elif request_type==2:
+        if(text!="Return"):
+            subject=text
+        global class_subject_df
+        class_subject_df=read_sheet_to_dataframe(class_id,subject)
+        keyboard=get__assignments(class_subject_df)
+        return ["Choose a specific assignment or leaderboard to view:",ReplyKeyboardMarkup(keyboard,resize_keyboard=True)]
     
-    elif request_type == 1:
-        # User selected a subject (worksheet)
-        if text != "Return":
-            user_data["subject"] = text
-        # Read the worksheet data into a DataFrame
-        df = read_sheet_to_dataframe(user_data.get("class_id", ""), text)
-        if df is None:
-            return ["Failed to load subject data.", None]
-        user_data["class_subject_df"] = df
-        keyboard = get__assignments(df)
-        return ["Choose a specific assignment or leaderboard to view:", ReplyKeyboardMarkup(keyboard, resize_keyboard=True)]
-    
-    elif request_type == 2:
-        # User selected an assignment or leaderboard
-        df = user_data.get("class_subject_df")
-        if df is None:
-            return ["Data not found.", None]
-        if "SCORE" in text:
-            result = get_assignment(df, text)
+    elif request_type==3:
+        if("SCORE" in text):
+            return get_assignment(class_subject_df,text)
         else:
-            result = get_lead(df)
-        return [result, None]
-    
+            return get_lead(class_subject_df)
     else:
-        # Default: show groups again
-        keyboard = split_list(our_groups_names)
-        return ["Choose a group:", ReplyKeyboardMarkup(keyboard, resize_keyboard=True)]
+        keyboard = split_list(our_groups_names)  # Rows of buttons
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        return ["Choose a group:", reply_markup]
 
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    user_data = context.user_data
 
-    print(f'User({update.message.chat.id}): {text}')
 
-    # Retrieve per-user state; if not present, initialize it.
-    request_type = user_data.get("request_type", 0)
-    
-    # Update request_type based on user input:
-    if text == "Return":
-        # Move one step back, but don't let it go below 0
-        user_data["request_type"] = max(0, request_type - 1)
-        request_type = user_data["request_type"]
+
+#message
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE,):
+    message_type: str = update.message.chat.type
+    text: str = update.message.text
+
+
+    print(f'User({update.message.chat.id}) in ({message_type}):{text}')
+    global our_groups_names
+    global our_sheets_names
+    global assignments
+    global request_type
+    print(our_groups_names)
+    if(text in our_groups_names):
+        request_type=1
+    elif text=="Return":
+        request_type=request_type-1
+    elif text in our_sheets_names:
+        request_type=2
+    elif text in assignments:
+        request_type=3
     else:
-        # Decide new request_type based on the input text and current state.
-        # Here we check if the input matches global shared lists.
-        if request_type == 0 and text in our_groups_names:
-            user_data["request_type"] = 1
-            request_type = 1
-        elif request_type == 1 and text in our_sheets_names:
-            user_data["request_type"] = 2
-            request_type = 2
-        elif request_type == 2 and (text in assignments or "SCORE" in text or text == "Leaderboard"):
-            user_data["request_type"] = 3
-            request_type = 3
-        # Otherwise, we leave request_type as is.
-    
-    response = handle_response(text, request_type, user_data)
-    
-    print(f'Bot response: {response}')
-    if request_type == 3:
-        # Final step, just send text.
-        await update.message.reply_text(text=response[0])
+        await update.message.reply_text("Try again, there is something wrong with your input!")
+        request_type=request_type
+
+    if(message_type=='group'):
+        if BOT_USERNAME in text:
+            new_text: str= text.replace(BOT_USERNAME,'').strip()
+            response = handle_response(new_text,1)
+        else:
+            return
     else:
-        # Send message with a keyboard if provided.
-        await update.message.reply_text(text=response[0], reply_markup=response[1])
+        print(request_type)
+        response=handle_response(text,request_type)
+    
+    print(f'Bot:{response}')
+    if(request_type==3):
+        await update.message.reply_text(text=response)
+    else:
+        await update.message.reply_text(text=response[0],reply_markup=response[1])
 
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(f'Error: {context.error}')
+async def error (update:Update,context:ContextTypes.DEFAULT_TYPE):
+    print(f'Update:{context.error}')
 
 
-# main
+
 def main():
-    global our_groups, our_groups_names
-    # Load global groups data once
-    our_groups = groups()
-    our_groups_names = [group['name'] for group in our_groups]
+
+    global our_groups_names
+    global our_groups
+    our_groups=groups()
+    our_groups_names=[i['name'] for i in our_groups]
     
-    app = Application.builder().token(TOKEN).build()
     
-    # Command handlers
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("custom1", custom1_command))
-    app.add_handler(CommandHandler("custom2", custom2_command))
+
+    #commands
+    app=Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler('start',start_command))
+    app.add_handler(CommandHandler('help',help_command))
+    app.add_handler(CommandHandler('custom1',custom1_command))
+    app.add_handler(CommandHandler('custom2',custom2_command))
+
+    #message
+
+    app.add_handler(MessageHandler(filters.TEXT, handle_message))
+
+    #error
     
-    # Message handler
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    # Error handler
-    app.add_error_handler(error_handler)
-    
+    app.add_error_handler(error)
+
     print("Polling...")
     app.run_polling(poll_interval=0.1)
 
 
+
+    
 if __name__ == "__main__":
     print("Starting the bot.")
+    #print([i["name"] for i in our_groups])
+    group_ids=read_sheet_to_dataframe("16EEvXqYoco_jBN4V44JJWCse30aGOpGGO53oz_5GE60","GroupIds")
+    
     main()
