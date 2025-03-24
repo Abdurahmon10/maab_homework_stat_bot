@@ -5,6 +5,10 @@ import pandas as pd
 from telegram import Bot, Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import asyncio
+import os
+from dotenv import load_dotenv, dotenv_values 
+
+load_dotenv() 
 
 # ---------------- Data Handling Setup ----------------
 
@@ -15,8 +19,11 @@ SCOPES = [
 ]
 
 # Path to your service account JSON file
-SERVICE_ACCOUNT_FILE = 'maabbot.json'
-SHARED_FOLDER_ID = "1c8M22kmwXJD5gaW1NOiH6Z-AYxUASxoP"
+SERVICE_ACCOUNT_FILE = os.getenv('SERVICE_ACCOUNT_FILE')
+SHARED_FOLDER_ID = os.getenv('SHARED_FOLDER_ID')
+GROUP_IDS_NAME=os.getenv('GROUP_IDS_NAME')
+print(GROUP_IDS_NAME)
+print(SERVICE_ACCOUNT_FILE,SHARED_FOLDER_ID)
 
 # Authenticate using the service account
 credentials = Credentials.from_service_account_file(
@@ -48,9 +55,11 @@ def groups():
         print(f"Error finding sheet: {e}")
         return []
 
+
+
 our_groups = groups()
 # Exclude the 'Group_Ids' file from group selection
-our_groups_names = [i['name'] for i in our_groups if i["name"] != "Group_Ids"]
+our_groups_names = [i['name'] for i in our_groups if i["name"] != GROUP_IDS_NAME]
 
 # Function to open a sheet (by its target id)
 def sheets(sheet_id):
@@ -59,7 +68,7 @@ def sheets(sheet_id):
         worksheets = spreadsheet.worksheets()
         return worksheets
     except Exception as e:
-        print(f"An error occurred: {e}")
+        print(f"An error occurred: {e} with {sheet_id}")
         return []
 
 # Read a specific worksheet into a DataFrame
@@ -108,18 +117,27 @@ def get_lead(df):
     result = "Leaderboard :\n" + result
     return result
 
+
 # ---------------- Bot Response Handling ----------------
 
 def handle_response(text: str, request_type: int, user_data: dict):
     # Request type 1: Handle group selection and list subjects
     if request_type == 1:
         sheet_id = ""
-        # Here, preserving your original behavior by looking for a specific group ("F18_test").
         # If you prefer using the text (group name) instead, replace "F18_test" with text.
         for i in our_groups:
             print(i)
-            if i["name"] == "F18_test":
-                sheet_id = i['shortcutDetails']['targetId']
+            if (i["name"] == text) or (text=='Return' and i["name"]==user_data['class_name']):
+                if(i['mimeType']== 'application/vnd.google-apps.shortcut' and i['shortcutDetails']['targetMimeType']=='application/vnd.google-apps.spreadsheet'):
+                    sheet_id = i['shortcutDetails']['targetId']
+                elif (i['mimeType']== 'application/vnd.google-apps.spreadsheet'):
+                    sheet_id = i['id']
+                else:
+                    print("file type is neither a shortcut nor a spreadsheet.")
+                    gg_response=give_groups()
+                    gg_response[0]="The file you have chosen was not a spreadsheet. Choose another group:"
+                    return gg_response
+
                 user_data['class_name'] = i["name"]
                 user_data['class_id'] = sheet_id
                 break
@@ -129,6 +147,7 @@ def handle_response(text: str, request_type: int, user_data: dict):
         user_data['our_sheets_names'] = our_sheets_names
         keyboard = [ws.title for ws in user_data['our_sheets']]
         keyboard.append("Return")
+        print(keyboard)
         keyboard = split_list(keyboard)  # Format rows of buttons
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         return ["Subjects:", reply_markup]
@@ -151,22 +170,32 @@ def handle_response(text: str, request_type: int, user_data: dict):
         else:
             return get_lead(user_data['class_subject_df'])
     else:
-        keyboard = split_list(our_groups_names)
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-        return ["Choose a group:", reply_markup]
+        return give_groups()
 
 # ---------------- Telegram Bot Commands ----------------
 
-BOT_USERNAME = '@maab_homework_bot'
-TOKEN = '7816384022:AAH0QTdTdNc9LxHBrZWGbyS9g2muFHY8nNo'
+
+BOT_USERNAME = os.getenv('BOT_USAERNAME')
+TOKEN = os.getenv('TOKEN')
+
+
+def give_groups():
+    global our_groups_names
+    global our_groups
+    our_groups = groups()
+    # Exclude the 'Group_Ids' file from group selection
+    our_groups_names = [i['name'] for i in our_groups if i["name"] != GROUP_IDS_NAME]
+    keyboard = split_list(our_groups_names)
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    return ["Choose a group:", reply_markup]
+
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = split_list(our_groups_names)
     await update.message.reply_text("The bot has started.")
     await update.message.reply_text("Choose a group:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
-
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Choose a class name==> choose the course===> choose the assignment number.")
+    await update.message.reply_text("Choose a class name==> choose the course===> choose the assignment number or leader board.")
 
 async def custom1_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("custom 1")
@@ -187,7 +216,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text in our_groups_names:
         user_data['request_type'] = 1
     elif text == "Return":
-        user_data['request_type'] = user_data.get('request_type', 0) - 1
+        if(user_data['request_type'] ==2 or user_data['request_type'] == 3):
+            user_data['request_type']=1
+        else:
+            user_data['request_type']=0
     elif 'our_sheets_names' in user_data and text in user_data['our_sheets_names']:
         user_data['request_type'] = 2
     elif 'assignments' in user_data and text in user_data['assignments']:
@@ -197,6 +229,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     request_type = user_data['request_type']
+    print(request_type)
     
     # Special handling for group messages
     if message_type == 'group':
@@ -212,7 +245,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # For request type 3, send the response to a group and then to the user
     if request_type == 3:
         # Read the group IDs from a specific sheet
-        group_ids = read_sheet_to_dataframe("16EeVxqYoco_jBN4V44JJWcse3oaGOpG6OS3oz_5GE60", "Group_Ids")
+        group_ids = read_sheet_to_dataframe("16EeVxqYoco_jBN4V44JJWcse3oaGOpG6OS3oz_5GE60", GROUP_IDS_NAME)
         print(group_ids)
         # Look up the target chat id using the lower-case class name
         target_ids = group_ids[group_ids["Group_name"] == user_data['class_name'].lower()]
